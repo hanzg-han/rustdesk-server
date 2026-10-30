@@ -1,0 +1,53 @@
+name: harden-build
+
+# Builds the hardened hbbs/hbbr (relay admission control) as static musl
+# binaries for x86_64, which is what the scratch-based server image needs.
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build-musl:
+    runs-on: ubuntu-22.04
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Install musl toolchain
+        run: sudo apt-get update && sudo apt-get install -y musl-tools pkg-config
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-unknown-linux-musl
+
+      - name: Configure musl linker
+        run: |
+          echo "CC_x86_64_unknown_linux_musl=musl-gcc" >> "$GITHUB_ENV"
+          echo "CXX_x86_64_unknown_linux_musl=musl-g++" >> "$GITHUB_ENV"
+          echo "CARGO_TARGET_X86_64_UNKNOWN_LINUX_MUSL_LINKER=musl-gcc" >> "$GITHUB_ENV"
+
+      - name: Cache cargo registry and target
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: musl-amd64
+
+      - name: Build
+        run: cargo build --release --target x86_64-unknown-linux-musl
+
+      - name: Report binaries
+        run: |
+          ls -la target/x86_64-unknown-linux-musl/release/hbbs \
+                 target/x86_64-unknown-linux-musl/release/hbbr
+          file target/x86_64-unknown-linux-musl/release/hbbs || true
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: binaries-musl-amd64
+          if-no-files-found: error
+          path: |
+            target/x86_64-unknown-linux-musl/release/hbbs
+            target/x86_64-unknown-linux-musl/release/hbbr

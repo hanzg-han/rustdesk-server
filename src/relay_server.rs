@@ -20,6 +20,7 @@ use hbb_common::{
     ResultType,
 };
 use sodiumoxide::crypto::sign;
+use crate::relay_gate;
 use std::{
     collections::{HashMap, HashSet},
     io::prelude::*,
@@ -31,10 +32,24 @@ use std::{
 type Usage = (usize, usize, usize, usize);
 
 lazy_static::lazy_static! {
-    static ref PEERS: Mutex<HashMap<String, Box<dyn StreamTrait>>> = Default::default();
+    static ref PEERS: Mutex<HashMap<String, PendingPeer>> = Default::default();
     static ref USAGE: RwLock<HashMap<String, Usage>> = Default::default();
     static ref BLACKLIST: RwLock<HashSet<String>> = Default::default();
     static ref BLOCKLIST: RwLock<HashSet<String>> = Default::default();
+}
+
+struct PendingPeer {
+    stream: Box<dyn StreamTrait>,
+    id: String,
+    ip: String,
+    since: i64,
+}
+
+fn now_ts() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or_default()
 }
 
 static DOWNGRADE_THRESHOLD_100: AtomicUsize = AtomicUsize::new(66); // 0.66
@@ -431,27 +446,60 @@ async fn make_pair_(stream: impl StreamTrait, addr: SocketAddr, key: &str, limit
                     log::warn!("Relay authentication failed from {} - invalid key", addr);
                     return;
                 }
+                if !relay_gate::uuid_issued(&rf.uuid, addr.ip()).await {
+                    log::info!(
+                        "Relay request {} from {} rejected: uuid was not issued by hbbs",
+                        rf.uuid,
+                        addr
+                    );
+                    return;
+                }
                 if !rf.uuid.is_empty() {
                     let mut peer = PEERS.lock().await.remove(&rf.uuid);
                     if let Some(peer) = peer.as_mut() {
                         log::info!("Relayrequest {} from {} got paired", rf.uuid, addr);
                         let id = format!("{}:{}", addr.ip(), addr.port());
                         USAGE.write().await.insert(id.clone(), Default::default());
-                        if !stream.is_ws() && !peer.is_ws() {
-                            peer.set_raw();
+                        if !stream.is_ws() && !peer.stream.is_ws() {
+                            peer.stream.set_raw();
                             stream.set_raw();
                             log::info!("Both are raw");
                         }
-                        if let Err(err) = relay(addr, &mut stream, peer, limiter, id.clone()).await
-                        {
-                            log::info!("Relay of {} closed: {}", addr, err);
+                        let client_ip = addr.ip().to_string();
+                        let peer_id = if rf.id.is_empty() {
+                            peer.id.clone()
                         } else {
-                            log::info!("Relay of {} closed", addr);
+                            rf.id.clone()
+                        };
+                        let started_at = peer.since;
+                        match relay(addr, &mut stream, &mut peer.stream, limiter, id.clone()).await {
+                            Ok((to_peer, to_client)) => {
+                                relay_gate::record_usage(relay_gate::UsageRecord {
+                                    uuid: &rf.uuid,
+                                    peer_id: &peer_id,
+                                    client_ip: &client_ip,
+                                    peer_ip: &peer.ip,
+                                    started_at,
+                                    bytes_to_peer: to_peer,
+                                    bytes_to_client: to_client,
+                                })
+                                .await;
+                                log::info!("Relay of {} closed", addr);
+                            }
+                            Err(err) => log::info!("Relay of {} closed: {}", addr, err),
                         }
                         USAGE.write().await.remove(&id);
                     } else {
                         log::info!("New relay request {} from {}", rf.uuid, addr);
-                        PEERS.lock().await.insert(rf.uuid.clone(), Box::new(stream));
+                        PEERS.lock().await.insert(
+                            rf.uuid.clone(),
+                            PendingPeer {
+                                stream: Box::new(stream),
+                                id: rf.id,
+                                ip: addr.ip().to_string(),
+                                since: now_ts(),
+                            },
+                        );
                         sleep(30.).await;
                         PEERS.lock().await.remove(&rf.uuid);
                     }
@@ -467,7 +515,7 @@ async fn relay(
     peer: &mut Box<dyn StreamTrait>,
     total_limiter: Limiter,
     id: String,
-) -> ResultType<()> {
+) -> ResultType<(u64, u64)> {
     let ip = addr.ip().to_string();
     let mut tm = std::time::Instant::now();
     let mut elapsed = 0;
@@ -476,6 +524,8 @@ async fn relay(
     let mut highest_s = 0;
     let mut downgrade: bool = false;
     let mut blacked: bool = false;
+    let mut to_peer: u64 = 0;
+    let mut to_client: u64 = 0;
     let sb = SINGLE_BANDWIDTH.load(Ordering::SeqCst) as f64;
     let limiter = <Limiter>::new(sb);
     let blacklist_limiter = <Limiter>::new(LIMIT_SPEED.load(Ordering::SeqCst) as _);
@@ -496,6 +546,7 @@ async fn relay(
                     }
                     total_limiter.consume(nb).await;
                     total += nb;
+                    to_client += bytes.len() as u64;
                     total_s += nb;
                     if !bytes.is_empty() {
                         stream.send_raw(bytes.into()).await?;
@@ -515,6 +566,7 @@ async fn relay(
                     }
                     total_limiter.consume(nb).await;
                     total += nb;
+                    to_peer += bytes.len() as u64;
                     total_s += nb;
                     if !bytes.is_empty() {
                         peer.send_raw(bytes.into()).await?;
@@ -562,7 +614,7 @@ async fn relay(
             }
         }
     }
-    Ok(())
+    Ok((to_peer, to_client))
 }
 
 fn get_server_sk(key: &str) -> String {

@@ -491,6 +491,16 @@ impl RendezvousServer {
                     return true;
                 }
                 Some(rendezvous_message::Union::RequestRelay(mut rf)) => {
+                    if let Err(reason) = crate::relay_gate::authorize(&rf.id, addr.ip()).await {
+                        let mut msg_out = RendezvousMessage::new();
+                        msg_out.set_relay_response(RelayResponse {
+                            refuse_reason: reason,
+                            ..Default::default()
+                        });
+                        Self::send_to_sink(sink, msg_out).await;
+                        return true;
+                    }
+                    crate::relay_gate::record_uuid(&rf.uuid, &rf.id, addr.ip()).await;
                     // there maybe several attempt, so sink can be none
                     if let Some(sink) = sink.take() {
                         self.tcp_punch.lock().await.insert(try_into_v4(addr), sink);
@@ -505,7 +515,11 @@ impl RendezvousServer {
                     return true;
                 }
                 Some(rendezvous_message::Union::RelayResponse(mut rr)) => {
-                    let addr_b = AddrMangle::decode(&rr.socket_addr);
+                    // Peer-initiated relays never pass the RequestRelay branch, so the uuid
+                    // hbbr is about to see has to be recorded here as well.
+                    if !rr.uuid.is_empty() {
+                        crate::relay_gate::record_uuid(&rr.uuid, &rr.id(), addr.ip()).await;
+                    }
                     rr.socket_addr = Default::default();
                     let id = rr.id();
                     if !id.is_empty() {
