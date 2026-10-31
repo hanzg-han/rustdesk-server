@@ -18,12 +18,19 @@ jobs:
     steps:
       - name: Install build prerequisites
         run: |
-          apk add --no-cache musl-dev pkgconf git build-base
+          apk add --no-cache musl-dev pkgconf git build-base openssl-dev
 
       - name: Checkout
         uses: actions/checkout@v4
         with:
           submodules: recursive
+
+      - name: Cache cargo registry and target
+        uses: Swatinem/rust-cache@v2
+        with:
+          # Keep the cache stable across runs: only the crate sources matter.
+          key: musl-amd64
+          cache-on-failure: true
 
       - name: Build
         run: cargo build --release
