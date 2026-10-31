@@ -521,17 +521,21 @@ impl RendezvousServer {
                     return true;
                 }
                 Some(rendezvous_message::Union::RelayResponse(mut rr)) => {
-                    // Peer-initiated relays never pass the RequestRelay branch, so the uuid
-                    // hbbr is about to see has to be recorded here as well - and the gate has
-                    // to run here too, otherwise a machine outside the whitelist could still
-                    // open a relay by initiating it. On refusal we neither forward the
-                    // response nor record the uuid, so the peer's own connection to hbbr is
-                    // rejected as unissued.
-                    if crate::relay_gate::authorize(&rr.id(), addr.ip()).await.is_err() {
+                    // A RelayResponse only carries an id when its sender initiated the relay,
+                    // so an empty id is the normal case and must not be refused; when it is
+                    // there, the initiator has to pass the gate as well. The uuid still has to
+                    // be recorded here: hbbr accepts only uuids hbbs has issued, and a relay
+                    // opened from this path never passed the RequestRelay branch.
+                    let rr_id = rr.id().to_owned();
+                    if !rr_id.is_empty()
+                        && crate::relay_gate::authorize(&rr_id, addr.ip())
+                            .await
+                            .is_err()
+                    {
                         return true;
                     }
                     if !rr.uuid.is_empty() {
-                        crate::relay_gate::record_uuid(&rr.uuid, &rr.id(), addr.ip()).await;
+                        crate::relay_gate::record_uuid(&rr.uuid, &rr_id, addr.ip()).await;
                     }
                     let addr_b = AddrMangle::decode(&rr.socket_addr);
                     rr.socket_addr = Default::default();
