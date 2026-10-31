@@ -32,16 +32,19 @@ jobs:
       - name: Cache cargo registry and target
         uses: Swatinem/rust-cache@v2
         with:
-          key: musl-amd64
+          key: musl-amd64-static
 
       - name: Build
+        env:
+          RUSTFLAGS: "-C target-feature=+crt-static"
         run: cargo build --release --target x86_64-unknown-linux-musl
 
       - name: Report binaries
         run: |
           ls -la target/x86_64-unknown-linux-musl/release/hbbs \
                  target/x86_64-unknown-linux-musl/release/hbbr
-          file target/x86_64-unknown-linux-musl/release/hbbs || true
+          file target/x86_64-unknown-linux-musl/release/hbbs
+          file target/x86_64-unknown-linux-musl/release/hbbr
 
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
