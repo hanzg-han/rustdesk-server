@@ -528,7 +528,7 @@ impl RendezvousServer {
                     // opened from this path never passed the RequestRelay branch.
                     let rr_id = rr.id().to_owned();
                     if !rr_id.is_empty()
-                        && crate::relay_gate::authorize(&rr_id, addr.ip())
+                        && crate::relay_gate::authorize_client(&rr_id, addr.ip())
                             .await
                             .is_err()
                     {
@@ -716,6 +716,20 @@ impl RendezvousServer {
             let mut msg_out = RendezvousMessage::new();
             msg_out.set_punch_hole_response(PunchHoleResponse {
                 failure: punch_hole_response::Failure::LICENSE_MISMATCH.into(),
+                ..Default::default()
+            });
+            return Ok((msg_out, None));
+        }
+        // The whitelist has to run here too: a gate only on the relay path left
+        // direct connections open, so a machine outside the list could connect
+        // by punching a hole without the relay ever being involved.
+        if let Err(reason) =
+            crate::relay_gate::authorize_connect(&ph.id, &ph.from_id, addr.ip()).await
+        {
+            let mut msg_out = RendezvousMessage::new();
+            msg_out.set_punch_hole_response(PunchHoleResponse {
+                failure: punch_hole_response::Failure::ID_NOT_EXIST.into(),
+                other_failure: reason,
                 ..Default::default()
             });
             return Ok((msg_out, None));

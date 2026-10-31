@@ -185,14 +185,31 @@ fn matches_rule(rule: &str, peer_id: &str) -> bool {
     }
 }
 
-/// Gate a relay request received by hbbs. `Err` carries the reason shown to
-/// the controller (`RelayResponse::refuse_reason`), so it must stay short.
+/// Shown to the controller when the machine it wants to reach is not listed.
+pub const DENIED_TARGET: &str = "该设备未加入白名单，无法连接";
+/// Shown when the requesting machine itself is not listed.
+pub const DENIED_CLIENT: &str = "本机未授权使用该服务器";
+/// Shown when the requesting client did not identify itself as our build.
+pub const DENIED_NOT_CUSTOM: &str = "请使用维思陆定制版登录";
+
+/// hbbs turns these into `RelayResponse::refuse_reason` / `PunchHoleResponse::other_failure`,
+/// which the client prints verbatim, so they stay short and user-facing.
+async fn listed(peer_id: &str) -> bool {
+    !peer_id.is_empty()
+        && load_whitelist()
+            .await
+            .iter()
+            .any(|rule| matches_rule(rule, peer_id))
+}
+
+/// Gate the machine being reached, on every path: relay and direct punch hole
+/// alike, otherwise a machine outside the list is still reachable by connecting
+/// without the relay.
 pub async fn authorize(peer_id: &str, ip: IpAddr) -> Result<(), String> {
     if !whitelist_enforced() {
         return Ok(());
     }
-    let entries = load_whitelist().await;
-    if entries.iter().any(|rule| matches_rule(rule, peer_id)) {
+    if listed(peer_id).await {
         return Ok(());
     }
     let reason = if peer_id.is_empty() {
@@ -202,10 +219,10 @@ pub async fn authorize(peer_id: &str, ip: IpAddr) -> Result<(), String> {
     };
     warn_throttled(&format!("{reason} (from {ip})"));
     record_denied(peer_id, ip, &reason).await;
-    Err("relay denied: peer id not allowed by server policy".to_owned())
+    Err(DENIED_TARGET.to_owned())
 }
 
-/// Gate the requesting side (RequestRelay.from_id).
+/// Gate the requesting side (RequestRelay.from_id, PunchHoleRequest.from_id).
 ///
 /// Clients that predate the field send nothing; those are allowed unless
 /// RELAY_REQUIRE_FROM_ID is on, so the fleet can be rolled out gradually and
@@ -217,15 +234,27 @@ pub async fn authorize_client(from_id: &str, ip: IpAddr) -> Result<(), String> {
     if from_id.is_empty() {
         if !is_on("RELAY_REQUIRE_FROM_ID") {
             warn_throttled(&format!(
-                "relay gate: relay request from {ip} carries no from_id (old client)"
+                "relay gate: request from {ip} carries no from_id (old client)"
             ));
             return Ok(());
         }
         let reason = format!("relay denied: request from {ip} carries no from_id");
         record_denied("", ip, &reason).await;
-        return Err("请使用维思陆定制版登录".to_owned());
+        return Err(DENIED_NOT_CUSTOM.to_owned());
     }
-    authorize(from_id, ip).await
+    if listed(from_id).await {
+        return Ok(());
+    }
+    let reason = format!("relay denied: requester {from_id} is not in the whitelist");
+    warn_throttled(&format!("{reason} (from {ip})"));
+    record_denied(from_id, ip, &reason).await;
+    Err(DENIED_CLIENT.to_owned())
+}
+
+/// Gate a direct (punch hole) connection: both ends, like the relay path.
+pub async fn authorize_connect(target_id: &str, from_id: &str, ip: IpAddr) -> Result<(), String> {
+    authorize(target_id, ip).await?;
+    authorize_client(from_id, ip).await
 }
 
 /// Record a refusal so the console can show who was turned away.
