@@ -16,7 +16,6 @@
 use hbb_common::log;
 use std::{
     net::IpAddr,
-    str::FromStr,
     sync::atomic::{AtomicI64, Ordering},
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
@@ -78,12 +77,14 @@ fn warn_throttled(msg: &str) {
     }
 }
 
-fn db_url() -> String {
-    let mut url = env_or("DB_URL", "./db_v2.sqlite3");
-    if !url.starts_with("sqlite:") {
-        url = format!("sqlite://{url}");
+fn db_path() -> String {
+    let path = env_or("DB_URL", "./db_v2.sqlite3");
+    for prefix in ["sqlite://", "sqlite:"] {
+        if let Some(rest) = path.strip_prefix(prefix) {
+            return rest.to_owned();
+        }
     }
-    url
+    path
 }
 
 async fn pool() -> Option<Pool> {
@@ -91,15 +92,16 @@ async fn pool() -> Option<Pool> {
     if let Some(pool) = guard.as_ref() {
         return Some(pool.clone());
     }
-    let opts = sqlx::sqlite::SqliteConnectOptions::from_str(&db_url())
-        .ok()?
+    let path = db_path();
+    let opts = sqlx::sqlite::SqliteConnectOptions::new()
+        .filename(&path)
         .create_if_missing(true)
         .busy_timeout(Duration::from_secs(3));
     let pool = sqlx::sqlite::SqlitePoolOptions::new()
         .max_connections(2)
         .connect_with(opts)
         .await
-        .map_err(|e| log::warn!("relay gate: cannot open {}: {}", db_url(), e))
+        .map_err(|e| log::warn!("relay gate: cannot open {}: {}", path, e))
         .ok()?;
     for sql in [
         "CREATE TABLE IF NOT EXISTS relay_uuid (
