@@ -20,14 +20,14 @@ use std::{
     sync::atomic::{AtomicI64, Ordering},
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
-use tokio::sync::Mutex;
+use hbb_common::tokio::sync::Mutex;
 
 type Pool = sqlx::SqlitePool;
 
 lazy_static::lazy_static! {
     static ref POOL: Mutex<Option<Pool>> = Mutex::new(None);
     static ref WHITELIST: Mutex<WhitelistCache> = Mutex::new(WhitelistCache::default());
-use hbb_common::tokio::sync::Mutex;
+}
 
 static LAST_WARN: AtomicI64 = AtomicI64::new(0);
 
