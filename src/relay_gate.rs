@@ -223,7 +223,7 @@ pub async fn authorize_client(from_id: &str, ip: IpAddr) -> Result<(), String> {
         }
         let reason = format!("relay denied: request from {ip} carries no from_id");
         record_denied("", ip, &reason).await;
-        return Err("relay denied: client id missing".to_owned());
+        return Err("请使用维思陆定制版登录".to_owned());
     }
     authorize(from_id, ip).await
 }
