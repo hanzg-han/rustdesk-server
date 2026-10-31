@@ -531,7 +531,8 @@ impl RendezvousServer {
                         return true;
                     }
                     if !rr.uuid.is_empty() {
-                        crate::relay_gate::record_uuid(&rr.uuid, &rr.id(), addr.ip()).await;
+                    let addr_b = AddrMangle::decode(&rr.socket_addr);
+                    rr.socket_addr = Default::default();
                     }
                     rr.socket_addr = Default::default();
                     let id = rr.id();
