@@ -18,7 +18,9 @@ jobs:
     steps:
       - name: Install build prerequisites
         run: |
-          apk add --no-cache musl-dev pkgconf git build-base openssl-dev
+          # GNU tar: the BusyBox one in this image cannot pack the cache archive
+          # (it lacks --posix), which made rust-cache save nothing.
+          apk add --no-cache musl-dev pkgconf git build-base openssl-dev tar
 
       - name: Checkout
         uses: actions/checkout@v4
