@@ -54,6 +54,13 @@ fn ttl() -> i64 {
     env_or("RELAY_UUID_TTL", "180").parse().unwrap_or(180).max(30)
 }
 
+fn is_on(name: &str) -> bool {
+    matches!(
+        env_or(name, "off").to_lowercase().as_str(),
+        "enforce" | "on" | "1" | "true" | "yes"
+    )
+}
+
 fn whitelist_enforced() -> bool {
     matches!(
         env_or("RELAY_WHITELIST_MODE", "off").to_lowercase().as_str(),
@@ -130,6 +137,14 @@ async fn pool() -> Option<Pool> {
             bytes_to_client INTEGER NOT NULL DEFAULT 0
         )",
         "CREATE INDEX IF NOT EXISTS idx_relay_usage_started ON relay_usage(started_at)",
+        "CREATE TABLE IF NOT EXISTS relay_denied (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            peer_id TEXT NOT NULL DEFAULT '',
+            ip TEXT NOT NULL DEFAULT '',
+            reason TEXT NOT NULL DEFAULT '',
+            created_at INTEGER NOT NULL DEFAULT 0
+        )",
+        "CREATE INDEX IF NOT EXISTS idx_relay_denied_created ON relay_denied(created_at)",
     ] {
         if let Err(e) = sqlx::query(sql).execute(&pool).await {
             log::warn!("relay gate: schema init failed: {}", e);
@@ -180,11 +195,61 @@ pub async fn authorize(peer_id: &str, ip: IpAddr) -> Result<(), String> {
     if entries.iter().any(|rule| matches_rule(rule, peer_id)) {
         return Ok(());
     }
-    let msg = format!(
-        "relay denied: peer {peer_id} from {ip} is not in the whitelist"
-    );
-    warn_throttled(&msg);
+    let reason = if peer_id.is_empty() {
+        "relay denied: request carried no peer id".to_owned()
+    } else {
+        format!("relay denied: peer {peer_id} is not in the whitelist")
+    };
+    warn_throttled(&format!("{reason} (from {ip})"));
+    record_denied(peer_id, ip, &reason).await;
     Err("relay denied: peer id not allowed by server policy".to_owned())
+}
+
+/// Gate the requesting side (RequestRelay.from_id).
+///
+/// Clients that predate the field send nothing; those are allowed unless
+/// RELAY_REQUIRE_FROM_ID is on, so the fleet can be rolled out gradually and
+/// then locked down.
+pub async fn authorize_client(from_id: &str, ip: IpAddr) -> Result<(), String> {
+    if !whitelist_enforced() {
+        return Ok(());
+    }
+    if from_id.is_empty() {
+        if !is_on("RELAY_REQUIRE_FROM_ID") {
+            warn_throttled(&format!(
+                "relay gate: relay request from {ip} carries no from_id (old client)"
+            ));
+            return Ok(());
+        }
+        let reason = format!("relay denied: request from {ip} carries no from_id");
+        record_denied("", ip, &reason).await;
+        return Err("relay denied: client id missing".to_owned());
+    }
+    authorize(from_id, ip).await
+}
+
+/// Record a refusal so the console can show who was turned away.
+pub async fn record_denied(peer_id: &str, ip: IpAddr, reason: &str) {
+    let Some(pool) = pool().await else {
+        return;
+    };
+    let now = now_ts();
+    let _ = sqlx::query("DELETE FROM relay_denied WHERE created_at < ?1")
+        .bind(now - 30 * 86400)
+        .execute(&pool)
+        .await;
+    if let Err(e) = sqlx::query(
+        "INSERT INTO relay_denied (peer_id, ip, reason, created_at) VALUES (?1, ?2, ?3, ?4)",
+    )
+    .bind(peer_id)
+    .bind(ip.to_string())
+    .bind(reason)
+    .bind(now)
+    .execute(&pool)
+    .await
+    {
+        warn_throttled(&format!("relay gate: cannot record denial: {e}"));
+    }
 }
 
 /// Record a relay uuid hbbs has just approved. hbbr accepts only these.

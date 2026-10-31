@@ -491,7 +491,13 @@ impl RendezvousServer {
                     return true;
                 }
                 Some(rendezvous_message::Union::RequestRelay(mut rf)) => {
-                    if let Err(reason) = crate::relay_gate::authorize(&rf.id, addr.ip()).await {
+                    // Both ends are gated: the target id in RequestRelay.id and the
+                    // requester in RequestRelay.from_id (new clients only).
+                    let gate = match crate::relay_gate::authorize(&rf.id, addr.ip()).await {
+                        Ok(()) => crate::relay_gate::authorize_client(&rf.from_id, addr.ip()).await,
+                        Err(reason) => Err(reason),
+                    };
+                    if let Err(reason) = gate {
                         let mut msg_out = RendezvousMessage::new();
                         msg_out.set_relay_response(RelayResponse {
                             refuse_reason: reason,
@@ -516,11 +522,17 @@ impl RendezvousServer {
                 }
                 Some(rendezvous_message::Union::RelayResponse(mut rr)) => {
                     // Peer-initiated relays never pass the RequestRelay branch, so the uuid
-                    // hbbr is about to see has to be recorded here as well.
+                    // hbbr is about to see has to be recorded here as well - and the gate has
+                    // to run here too, otherwise a machine outside the whitelist could still
+                    // open a relay by initiating it. On refusal we neither forward the
+                    // response nor record the uuid, so the peer's own connection to hbbr is
+                    // rejected as unissued.
+                    if crate::relay_gate::authorize(&rr.id(), addr.ip()).await.is_err() {
+                        return true;
+                    }
                     if !rr.uuid.is_empty() {
                         crate::relay_gate::record_uuid(&rr.uuid, &rr.id(), addr.ip()).await;
                     }
-                    let addr_b = AddrMangle::decode(&rr.socket_addr);
                     rr.socket_addr = Default::default();
                     let id = rr.id();
                     if !id.is_empty() {
